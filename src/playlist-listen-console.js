@@ -3,17 +3,19 @@
     ?.config.globalProperties.$pinia?._s;
   const state = stores?.get("usePlayerStore");
 
-  function readPlayerStatus() {
+  function enableOrdinaryListen() {
     const abTest = stores?.get("AbTestStore");
-    return {
-      pcListenEnabled: abTest?.isListenVideoEnabled,
-      bizType: state.bizType,
-      isPlayLocal: state.isPlayLocal,
-      isListenSupported: state.isListenSupported,
+    if (!abTest) throw new Error("请在已加载视频的播放窗口运行");
+
+    const config = abTest.abTestConf;
+    abTest.abTestConf = {
+      ...config,
+      pc_listen: { ...config?.pc_listen, value: "1" },
     };
+    return abTest.isListenVideoEnabled;
   }
 
-  if (state && !state.bizType) return readPlayerStatus();
+  if (state && !state.bizType) return enableOrdinaryListen();
 
   const playlist = stores?.get("useMediaListStore");
   const player = window.biliPlayer;
@@ -242,7 +244,7 @@
   function updateButtons() {
     if (!samePlaylist()) {
       stop();
-      if (!state.bizType) console.log(readPlayerStatus());
+      if (!state.bizType) enableOrdinaryListen();
       return;
     }
 
