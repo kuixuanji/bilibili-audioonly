@@ -39,8 +39,9 @@
   const showEndPanelEvent = "Player_Show_EndPanel";
   const listenEntryEvent = "Player_RichPip_Entry";
   const loadedMetadataEvent = "Player_LoadedMetadata";
+  const qualityRequestedEvent = "Player_Quality_Requested";
   let wantsListenMode = false;
-  let savedVideoQuality;
+  let rememberedVideoQuality;
   let pendingVideoQuality;
   let restoringVideoQuality = false;
   let randomOrder = [];
@@ -126,7 +127,7 @@
         || restoringVideoQuality) return;
 
     if (isEnter) {
-      savedVideoQuality = pendingVideoQuality?.quality ?? videoQuality();
+      rememberedVideoQuality ??= videoQuality();
       pendingVideoQuality = undefined;
       wantsListenMode = true;
       setMode.call(player, "listen");
@@ -134,20 +135,28 @@
     }
 
     wantsListenMode = false;
-    pendingVideoQuality = savedVideoQuality ? {
-      quality: savedVideoQuality,
+    pendingVideoQuality = rememberedVideoQuality ? {
+      quality: rememberedVideoQuality,
       cid: player.getManifest?.()?.cid,
       oldMedia: player.mediaElement?.(),
       startedAt: performance.now(),
       metadataReady: false,
       retryAt: 0,
     } : undefined;
-    savedVideoQuality = undefined;
     switchToVideo(pendingVideoQuality?.quality);
   }
 
   function onLoadedMetadata() {
     if (pendingVideoQuality) pendingVideoQuality.metadataReady = true;
+  }
+
+  function onQualityRequested(event) {
+    const { mediaType, isAutomatic } = event?.detail ?? {};
+    if (mediaType === "video" && isAutomatic === false && samePlaylist() && !wantsListenMode
+        && !restoringVideoQuality && !state.isChanging && !state.dataLoading) {
+      rememberedVideoQuality = undefined;
+      pendingVideoQuality = undefined;
+    }
   }
 
   async function applyVideoQuality(quality, kernel) {
@@ -164,6 +173,13 @@
     } else if (Number(player.getQuality?.()?.nowQ) !== quality) {
       await player.requestQuality?.(quality);
     }
+  }
+
+  function finishVideoQualityRestore(pending, qn) {
+    if (pendingVideoQuality !== pending) return;
+    // Keep the original tier when this video needed a fallback.
+    if (qn === pending.quality.qn) rememberedVideoQuality = undefined;
+    pendingVideoQuality = undefined;
   }
 
   function restoreVideoQuality() {
@@ -193,13 +209,13 @@
 
     const qn = preferredVideoQuality(pending.quality, tracks);
     if (!(qn > 0) || Number(player.getQuality?.()?.realQ) === qn) {
-      pendingVideoQuality = undefined;
+      finishVideoQualityRestore(pending, qn);
       return;
     }
 
     restoringVideoQuality = true;
     applyVideoQuality(qn, dash)
-      .then(() => { if (pendingVideoQuality === pending) pendingVideoQuality = undefined; })
+      .then(() => finishVideoQualityRestore(pending, qn))
       .catch(error => {
         pending.lastError = error;
         pending.retryAt = performance.now() + 500;
@@ -355,6 +371,7 @@
     player.off(showEndPanelEvent, suppressPlaylistRecommendation);
     player.off(listenEntryEvent, onListenEntry);
     player.off(loadedMetadataEvent, onLoadedMetadata);
+    player.off(qualityRequestedEvent, onQualityRequested);
     if (player.setRichPipMode === keepListenMode) player.setRichPipMode = setMode;
     if (player.setRichPipEntryEnabled === keepListenEntryEnabled) player.setRichPipEntryEnabled = setEntryEnabled;
     if (playlist.changeP === changePInListenMode) playlist.changeP = changeP;
@@ -388,6 +405,7 @@
     player.on(showEndPanelEvent, suppressPlaylistRecommendation);
     player.on(listenEntryEvent, onListenEntry);
     player.on(loadedMetadataEvent, onLoadedMetadata);
+    player.on(qualityRequestedEvent, onQualityRequested);
     window.addEventListener("click", onArrowClick, true);
     updateTimer = setInterval(updateButtons, 250);
     updateButtons();
