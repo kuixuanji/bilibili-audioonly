@@ -70,17 +70,27 @@
     return { qn, width: media?.videoWidth, height: media?.videoHeight };
   }
 
-  function matchingVideoQuality(saved, tracks) {
-    const exact = tracks.find(track => Number(track.id) === saved.qn);
-    const sameSize = exact ?? tracks.find(track => saved.width && saved.height
+  function preferredVideoQuality(saved, tracks) {
+    const available = tracks.filter(track => {
+      const qn = Number(track.id);
+      return Number.isFinite(qn) && qn > 0;
+    });
+    const exact = available.find(track => Number(track.id) === saved.qn);
+    const sameSize = exact ?? available.find(track => saved.width && saved.height
       && Number(track.width) === saved.width && Number(track.height) === saved.height);
-    return sameSize ? Number(sameSize.id) : undefined;
+    if (sameSize) return Number(sameSize.id);
+
+    const pixels = track => Number(track.width) * Number(track.height);
+    const hasDimensions = available.every(track => Number.isFinite(pixels(track)) && pixels(track) > 0);
+    available.sort((first, second) => (hasDimensions ? pixels(second) - pixels(first) : 0)
+      || Number(second.id) - Number(first.id));
+    return available.length ? Number(available[0].id) : undefined;
   }
 
   function switchToVideo(saved) {
     const kernel = player.__core?.();
     const manifestTracks = kernel?.getMpd?.()?.video;
-    const qn = saved && Array.isArray(manifestTracks) ? matchingVideoQuality(saved, manifestTracks) : undefined;
+    const qn = saved && Array.isArray(manifestTracks) ? preferredVideoQuality(saved, manifestTracks) : undefined;
     const getQualityList = kernel?.getQualityList;
     if (!(qn > 0) || Number(player.getQuality?.()?.realQ) === qn
         || typeof getQualityList !== "function" || typeof kernel.getQualityFor !== "function") {
@@ -181,7 +191,7 @@
     const tracks = dash ? dash.getQualityList("video") : player.getSupportedQualityList?.()?.map(id => ({ id }));
     if (!tracks?.length) return;
 
-    const qn = matchingVideoQuality(pending.quality, tracks);
+    const qn = preferredVideoQuality(pending.quality, tracks);
     if (!(qn > 0) || Number(player.getQuality?.()?.realQ) === qn) {
       pendingVideoQuality = undefined;
       return;
