@@ -2,9 +2,22 @@
   const stores = document.querySelector("#app")?.__vue_app__
     ?.config.globalProperties.$pinia?._s;
   const state = stores?.get("usePlayerStore");
+
+  function readPlayerStatus() {
+    const abTest = stores?.get("AbTestStore");
+    return {
+      pcListenEnabled: abTest?.isListenVideoEnabled,
+      bizType: state.bizType,
+      isPlayLocal: state.isPlayLocal,
+      isListenSupported: state.isListenSupported,
+    };
+  }
+
+  if (state && !state.bizType) return readPlayerStatus();
+
   const playlist = stores?.get("useMediaListStore");
   const player = window.biliPlayer;
-  if (!state?.bizType || typeof playlist?.changeMediaPage !== "function"
+  if (!state || typeof playlist?.changeMediaPage !== "function"
       || typeof playlist.changeP !== "function" || !player?.isInitialized?.()
       || typeof player.setRichPipMode !== "function"
       || typeof player.setRichPipEntryEnabled !== "function"
@@ -229,6 +242,7 @@
   function updateButtons() {
     if (!samePlaylist()) {
       stop();
+      if (!state.bizType) console.log(readPlayerStatus());
       return;
     }
 
