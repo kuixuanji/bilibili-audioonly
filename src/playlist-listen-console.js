@@ -63,8 +63,51 @@
     const quality = player.getQuality?.();
     const real = Number(quality?.realQ);
     const selected = Number(quality?.nowQ);
-    if (Number.isFinite(real) && real > 0) return real;
-    return Number.isFinite(selected) && selected > 0 ? selected : undefined;
+    const qn = Number.isFinite(real) && real > 0 ? real : selected;
+    if (!Number.isFinite(qn) || qn <= 0) return undefined;
+
+    const media = player.mediaElement?.();
+    return { qn, width: media?.videoWidth, height: media?.videoHeight };
+  }
+
+  function matchingVideoQuality(saved, tracks) {
+    const exact = tracks.find(track => Number(track.id) === saved.qn);
+    const sameSize = exact ?? tracks.find(track => saved.width && saved.height
+      && Number(track.width) === saved.width && Number(track.height) === saved.height);
+    return sameSize ? Number(sameSize.id) : undefined;
+  }
+
+  function switchToVideo(saved) {
+    const kernel = player.__core?.();
+    const manifestTracks = kernel?.getMpd?.()?.video;
+    const qn = saved && Array.isArray(manifestTracks) ? matchingVideoQuality(saved, manifestTracks) : undefined;
+    const getQualityList = kernel?.getQualityList;
+    if (!(qn > 0) || Number(player.getQuality?.()?.realQ) === qn
+        || typeof getQualityList !== "function" || typeof kernel.getQualityFor !== "function") {
+      return setMode.call(player, "video");
+    }
+
+    // Native recovery reads realQ from the old DASH kernel before creating the new video track.
+    // After audio-only startup the old kernel can have a manifest but no active video bitrate list.
+    function getRestoreQualityList(type) {
+      const tracks = getQualityList.call(this, type);
+      if (type !== "video") return tracks;
+      const currentIndex = this.getQualityFor(type);
+      const list = tracks?.slice() ?? [];
+      list[currentIndex] = { ...list[currentIndex], id: qn };
+      return list;
+    }
+
+    const descriptor = Object.getOwnPropertyDescriptor(kernel, "getQualityList");
+    if (!Reflect.set(kernel, "getQualityList", getRestoreQualityList)) {
+      return setMode.call(player, "video");
+    }
+    try {
+      return setMode.call(player, "video");
+    } finally {
+      if (descriptor) Object.defineProperty(kernel, "getQualityList", descriptor);
+      else delete kernel.getQualityList;
+    }
   }
 
   function onListenEntry(event) {
@@ -87,21 +130,18 @@
       oldMedia: player.mediaElement?.(),
       startedAt: performance.now(),
       metadataReady: false,
+      retryAt: 0,
     } : undefined;
     savedVideoQuality = undefined;
-    setMode.call(player, "video");
+    switchToVideo(pendingVideoQuality?.quality);
   }
 
   function onLoadedMetadata() {
     if (pendingVideoQuality) pendingVideoQuality.metadataReady = true;
   }
 
-  async function applyVideoQuality(quality) {
-    const kernel = player.__core?.();
-    const tracks = kernel?.getQualityList?.("video");
-    if (Array.isArray(tracks) && typeof kernel.setQualityFor === "function") {
-      if (!tracks.some(track => Number(track.id) === quality)) return;
-
+  async function applyVideoQuality(quality, kernel) {
+    if (kernel) {
       // Only change the active DASH stream. Keep the player's Auto preference intact.
       const dash = kernel.getCorePlayer?.();
       const wasAuto = dash?.getAutoSwitchQualityFor?.("video") === true;
@@ -111,33 +151,49 @@
       } finally {
         if (wasAuto && player.__core?.() === kernel) dash.setAutoSwitchQualityFor("video", true);
       }
-    } else if (player.getSupportedQualityList?.()?.some(qn => Number(qn) === quality)
-        && Number(player.getQuality?.()?.nowQ) !== quality) {
+    } else if (Number(player.getQuality?.()?.nowQ) !== quality) {
       await player.requestQuality?.(quality);
     }
   }
 
   function restoreVideoQuality() {
     const pending = pendingVideoQuality;
-    if (!pending) return;
+    if (!pending || restoringVideoQuality) return;
 
-    const elapsed = performance.now() - pending.startedAt;
-    if (player.getManifest?.()?.cid !== pending.cid || elapsed > 15000) {
+    const now = performance.now();
+    const elapsed = now - pending.startedAt;
+    if (player.getManifest?.()?.cid !== pending.cid || elapsed > 20000) {
       pendingVideoQuality = undefined;
+      if (pending.lastError && elapsed > 20000) {
+        console.warn("恢复进入听视频前的清晰度失败", pending.lastError);
+      }
       return;
     }
 
     // The native player replaces the video element on seamless restore, or reloads its metadata.
     const media = player.mediaElement?.();
-    if (state.isChanging || state.dataLoading || !media?.videoHeight || media.readyState < 2
+    if (now < pending.retryAt || state.isChanging || state.dataLoading || !media?.videoHeight || media.readyState < 2
         || (media === pending.oldMedia && !pending.metadataReady && elapsed < 11000)) return;
 
-    pendingVideoQuality = undefined;
-    if (Number(player.getQuality?.()?.realQ) === pending.quality) return;
+    const kernel = player.__core?.();
+    const dash = typeof kernel?.getQualityList === "function" && typeof kernel.setQualityFor === "function"
+      ? kernel : undefined;
+    const tracks = dash ? dash.getQualityList("video") : player.getSupportedQualityList?.()?.map(id => ({ id }));
+    if (!tracks?.length) return;
+
+    const qn = matchingVideoQuality(pending.quality, tracks);
+    if (!(qn > 0) || Number(player.getQuality?.()?.realQ) === qn) {
+      pendingVideoQuality = undefined;
+      return;
+    }
 
     restoringVideoQuality = true;
-    applyVideoQuality(pending.quality)
-      .catch(error => console.warn("恢复进入听视频前的清晰度失败", error))
+    applyVideoQuality(qn, dash)
+      .then(() => { if (pendingVideoQuality === pending) pendingVideoQuality = undefined; })
+      .catch(error => {
+        pending.lastError = error;
+        pending.retryAt = performance.now() + 500;
+      })
       .finally(() => { restoringVideoQuality = false; });
   }
 
